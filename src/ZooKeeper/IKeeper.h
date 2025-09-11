@@ -228,6 +228,9 @@ struct CreateRequest : virtual Request
     bool is_sequential = false;
     ACLs acls;
 
+    /// should it succeed if node already exists
+    bool not_exists = false;
+
     void addRootPath(const String & root_path) override;
     String getPath() const override { return path; }
 };
@@ -317,6 +320,9 @@ struct CheckRequest : virtual Request
 {
     String path;
     int32_t version = -1;
+
+    /// should it check if a node DOES NOT exist
+    bool not_exists = false;
 
     void addRootPath(const String & root_path) override;
     String getPath() const override { return path; }

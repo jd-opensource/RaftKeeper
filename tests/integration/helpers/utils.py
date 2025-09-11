@@ -1,13 +1,17 @@
-from kazoo.client import KazooClient, Create, GetData, GetChildren, OPEN_ACL_UNSAFE, string_types, bytes_types, \
-    GetChildren2, Exists
+from kazoo.client import KazooClient, Create, GetData, GetChildren, OPEN_ACL_UNSAFE, \
+    GetChildren2, Exists, TransactionRequest, Create2
 from kazoo.protocol.paths import _prefix_root
 from kazoo.protocol.serialization import MultiHeader, Transaction, multiheader_struct, int_struct, read_string, \
-    read_buffer, stat_struct, ZnodeStat, write_string
+    read_buffer, stat_struct, ZnodeStat, write_string, write_buffer
 from kazoo.protocol.connection import ReplyHeader
-from kazoo.exceptions import EXCEPTIONS, MarshallingError
+from kazoo.exceptions import EXCEPTIONS, MarshallingError, NoNodeError
+from kazoo.security import ACL
+from kazoo.handlers.utils import capture_exceptions, wrap
 from collections import namedtuple
 import struct
+from os.path import split
 
+bytes_types = (bytes, bytearray)
 
 def close_zk_clients(zk_clients):
     for zk_client in zk_clients:
@@ -35,6 +39,37 @@ def clear_zk_children(zk_client, path):
     finally:
         close_zk_client(zk_client)
 
+
+class CheckIfNotExistsVersion(namedtuple("CheckVersion", "path version")):
+    type = 501
+
+    def serialize(self):
+        b = bytearray()
+        b.extend(write_string(self.path))
+        b.extend(int_struct.pack(self.version))
+        return b
+
+
+class CreateIfNotExists(namedtuple("CreateIfNotExists", "path data acl flags")):
+    type = 502
+
+    def serialize(self):
+        b = bytearray()
+        b.extend(write_string(self.path))
+        b.extend(write_buffer(self.data))
+        b.extend(int_struct.pack(len(self.acl)))
+        for acl in self.acl:
+            b.extend(
+                int_struct.pack(acl.perms)
+                + write_string(acl.id.scheme)
+                + write_string(acl.id.id)
+            )
+        b.extend(int_struct.pack(self.flags))
+        return b
+
+    @classmethod
+    def deserialize(cls, bytes, offset):
+        return read_string(bytes, offset)[0]
 
 class MultiReadRequest(object):
     """A Zookeeper MultiReadRequest
@@ -64,7 +99,7 @@ class MultiReadRequest(object):
         if acl is None and self.client.default_acl:
             acl = self.client.default_acl
 
-        if not isinstance(path, string_types):
+        if not isinstance(path, str):
             raise TypeError("Invalid type for 'path' (string expected)")
         if acl and not isinstance(acl, (tuple, list)):
             raise TypeError("Invalid type for 'acl' (acl must be a tuple/list"
@@ -245,7 +280,7 @@ class KeeperFeatureClient(KazooClient):
         :rtype: :class:`~kazoo.interfaces.IAsyncResult`
 
         """
-        if not isinstance(path, string_types):
+        if not isinstance(path, str):
             raise TypeError("Invalid type for 'path' (string expected)")
         if watch and not callable(watch):
             raise TypeError("Invalid type for 'watch' (must be a callable)")
@@ -264,9 +299,315 @@ class KeeperFeatureClient(KazooClient):
                 req = GetChildren(_prefix_root(self.chroot, path), watch)
         self._call(req, async_result)
         return async_result
+    def _create_async_inner(
+        self, path, value, acl, flags, trailing=False, include_data=False, if_not_exsits=False
+    ):
+        async_result = self.handler.async_result()
+        if if_not_exsits:
+            opcode = CreateIfNotExists
+        elif include_data:
+            opcode = Create2
+        else:
+            opcode = Create
 
+        call_result = self._call(
+            opcode(
+                _prefix_root(self.chroot, path, trailing=trailing),
+                value,
+                acl,
+                flags,
+            ),
+            async_result,
+        )
+        if call_result is False:
+            # We hit a short-circuit exit on the _call. Because we are
+            # not using the original async_result here, we bubble the
+            # exception upwards to the do_create function in
+            # KazooClient.create so that it gets set on the correct
+            # async_result object
+            raise async_result.exception
+        return async_result
 
+    def create_if_not_exists_async(
+            self,
+            path,
+            value=b"",
+            acl=None,
+            ephemeral=False,
+            sequence=False,
+            makepath=False,
+            include_data=False,
+    ):
+        """Asynchronously create a ZNode if not exists. Takes the same arguments as
+        :meth:`create`.
 
+        :rtype: :class:`~kazoo.interfaces.IAsyncResult`
+
+        .. versionadded:: 1.1
+            The makepath option.
+        .. versionadded:: 2.7
+            The `include_data` option.
+        """
+        if acl is None and self.default_acl:
+            acl = self.default_acl
+
+        if not isinstance(path, str):
+            raise TypeError("Invalid type for 'path' (string expected)")
+        if acl and (
+                isinstance(acl, ACL) or not isinstance(acl, (tuple, list))
+        ):
+            raise TypeError(
+                "Invalid type for 'acl' (acl must be a tuple/list" " of ACL's"
+            )
+        if value is not None and not isinstance(value, bytes):
+            raise TypeError("Invalid type for 'value' (must be a byte string)")
+        if not isinstance(ephemeral, bool):
+            raise TypeError("Invalid type for 'ephemeral' (bool expected)")
+        if not isinstance(sequence, bool):
+            raise TypeError("Invalid type for 'sequence' (bool expected)")
+        if not isinstance(makepath, bool):
+            raise TypeError("Invalid type for 'makepath' (bool expected)")
+        if not isinstance(include_data, bool):
+            raise TypeError("Invalid type for 'include_data' (bool expected)")
+
+        flags = 0
+        if ephemeral:
+            flags |= 1
+        if sequence:
+            flags |= 2
+        if acl is None:
+            acl = OPEN_ACL_UNSAFE
+
+        async_result = self.handler.async_result()
+
+        @capture_exceptions(async_result)
+        def do_create():
+            result = self._create_async_inner(
+                path,
+                value,
+                acl,
+                flags,
+                trailing=sequence,
+                include_data=include_data,
+                if_not_exsits=True,
+            )
+            result.rawlink(create_completion)
+
+        @capture_exceptions(async_result)
+        def retry_completion(result):
+            result.get()
+            do_create()
+
+        @wrap(async_result)
+        def create_completion(result):
+            try:
+                if include_data:
+                    new_path, stat = result.get()
+                    return self.unchroot(new_path), stat
+                else:
+                    return self.unchroot(result.get())
+            except NoNodeError:
+                if not makepath:
+                    raise
+                if sequence and path.endswith("/"):
+                    parent = path.rstrip("/")
+                else:
+                    parent, _ = split(path)
+                self.ensure_path_async(parent, acl).rawlink(retry_completion)
+
+        do_create()
+        return async_result
+
+    def create_if_not_exists(
+            self,
+            path,
+            value=b"",
+            acl=None,
+            ephemeral=False,
+            sequence=False,
+            makepath=False,
+            include_data=False,
+    ):
+        """Create a node with the given value as its data. Optionally
+        set an ACL on the node.
+
+        The ephemeral and sequence arguments determine the type of the
+        node.
+
+        An ephemeral node will be automatically removed by ZooKeeper
+        when the session associated with the creation of the node
+        expires.
+
+        A sequential node will be given the specified path plus a
+        suffix `i` where i is the current sequential number of the
+        node. The sequence number is always fixed length of 10 digits,
+        0 padded. Once such a node is created, the sequential number
+        will be incremented by one.
+
+        If a node with the same actual path already exists in
+        ZooKeeper, a NodeExistsError will be raised. Note that since a
+        different actual path is used for each invocation of creating
+        sequential nodes with the same path argument, the call will
+        never raise NodeExistsError.
+
+        If the parent node does not exist in ZooKeeper, a NoNodeError
+        will be raised. Setting the optional `makepath` argument to
+        `True` will create all missing parent nodes instead.
+
+        An ephemeral node cannot have children. If the parent node of
+        the given path is ephemeral, a NoChildrenForEphemeralsError
+        will be raised.
+
+        This operation, if successful, will trigger all the watches
+        left on the node of the given path by :meth:`exists` and
+        :meth:`get` API calls, and the watches left on the parent node
+        by :meth:`get_children` API calls.
+
+        The maximum allowable size of the node value is 1 MB. Values
+        larger than this will cause a ZookeeperError to be raised.
+
+        :param path: Path of node.
+        :param value: Initial bytes value of node.
+        :param acl: :class:`~kazoo.security.ACL` list.
+        :param ephemeral: Boolean indicating whether node is ephemeral
+                          (tied to this session).
+        :param sequence: Boolean indicating whether path is suffixed
+                         with a unique index.
+        :param makepath: Whether the path should be created if it
+                         doesn't exist.
+        :param include_data:
+            Include the :class:`~kazoo.protocol.states.ZnodeStat` of
+            the node in addition to its real path. This option changes
+            the return value to be a tuple of (path, stat).
+
+        :returns: Real path of the new node, or tuple if `include_data`
+                  is `True`
+        :rtype: str
+
+        :raises:
+            :exc:`~kazoo.exceptions.NodeExistsError` if the node
+            already exists.
+
+            :exc:`~kazoo.exceptions.NoNodeError` if parent nodes are
+            missing.
+
+            :exc:`~kazoo.exceptions.NoChildrenForEphemeralsError` if
+            the parent node is an ephemeral node.
+
+            :exc:`~kazoo.exceptions.ZookeeperError` if the provided
+            value is too large.
+
+            :exc:`~kazoo.exceptions.ZookeeperError` if the server
+            returns a non-zero error code.
+
+        .. versionadded:: 1.1
+            The `makepath` option.
+        .. versionadded:: 2.7
+            The `include_data` option.
+        """
+        acl = acl or self.default_acl
+        return self.create_if_not_exists_async(
+            path,
+            value,
+            acl=acl,
+            ephemeral=ephemeral,
+            sequence=sequence,
+            makepath=makepath,
+            include_data=include_data,
+        ).get()
+
+    def transaction(self):
+        """Create and return a :class:`TransactionRequest` object
+
+        Creates a :class:`TransactionRequest` object. A Transaction can
+        consist of multiple operations which can be committed as a
+        single atomic unit. Either all of the operations will succeed
+        or none of them.
+
+        :returns: A TransactionRequest.
+        :rtype: :class:`TransactionRequest`
+
+        .. versionadded:: 0.6
+            Requires Zookeeper 3.4+
+
+        """
+        return TransactionRequestExt(self)
+
+class TransactionRequestExt(TransactionRequest):
+    """A Zookeeper Transaction Request
+
+    A Transaction provides a builder object that can be used to
+    construct and commit an atomic set of operations. The transaction
+    must be committed before its sent.
+
+    Transactions are not thread-safe and should not be accessed from
+    multiple threads at once.
+
+    .. note::
+
+        The ``committed`` attribute only indicates whether this
+        transaction has been sent to Zookeeper and is used to prevent
+        duplicate commits of the same transaction. The result should be
+        checked to determine if the transaction executed as desired.
+
+    .. versionadded:: 0.6
+        Requires Zookeeper 3.4+
+
+    """
+
+    def check_if_not_exists(self, path, version):
+        """Add a Check Version to the transaction.
+
+        This command will fail and abort a transaction if the path
+        does not match the specified version.
+
+        """
+        if not isinstance(path, str):
+            raise TypeError("Invalid type for 'path' (string expected)")
+        if not isinstance(version, int):
+            raise TypeError("Invalid type for 'version' (int expected)")
+        self._add(
+            CheckIfNotExistsVersion(_prefix_root(self.client.chroot, path), version)
+        )
+
+    def create_if_not_exist(self, path, value=b"", acl=None, ephemeral=False,
+                            sequence=False):
+        """Add a create ZNode ops to the operations.
+
+        .. note::
+
+            Create ops is illegal for mulitRead,
+            Will get `kazoo.exceptions.MarshallingError` after commit
+            It's only used for test.
+
+        :returns: None
+
+        """
+        if acl is None and self.client.default_acl:
+            acl = self.client.default_acl
+
+        if not isinstance(path, str):
+            raise TypeError("Invalid type for 'path' (string expected)")
+        if acl and not isinstance(acl, (tuple, list)):
+            raise TypeError("Invalid type for 'acl' (acl must be a tuple/list"
+                            " of ACL's")
+        if not isinstance(value, bytes_types):
+            raise TypeError("Invalid type for 'value' (must be a byte string)")
+        if not isinstance(ephemeral, bool):
+            raise TypeError("Invalid type for 'ephemeral' (bool expected)")
+        if not isinstance(sequence, bool):
+            raise TypeError("Invalid type for 'sequence' (bool expected)")
+
+        flags = 0
+        if ephemeral:
+            flags |= 1
+        if sequence:
+            flags |= 2
+        if acl is None:
+            acl = OPEN_ACL_UNSAFE
+
+        self._add(CreateIfNotExists(_prefix_root(self.client.chroot, path), value, acl,
+                                    flags), None)
 
 class MultiRead(namedtuple('MultiRead', 'operations')):
     type = 22
@@ -336,7 +677,7 @@ class MultiRead(namedtuple('MultiRead', 'operations')):
     def unchroot(client, response):
         resp = []
         for result in response:
-            if isinstance(result, string_types):
+            if isinstance(result, str):
                 resp.append(client.unchroot(result))
             else:
                 resp.append(result)

@@ -586,7 +586,7 @@ ZooKeeperResponsePtr ZooKeeperGetRequest::makeResponse() const { return std::mak
 ZooKeeperResponsePtr ZooKeeperSetRequest::makeResponse() const { return std::make_shared<ZooKeeperSetResponse>(); }
 ZooKeeperResponsePtr ZooKeeperListRequest::makeResponse() const { return std::make_shared<ZooKeeperListResponse>(); }
 ZooKeeperResponsePtr ZooKeeperSimpleListRequest::makeResponse() const { return std::make_shared<ZooKeeperSimpleListResponse>(); }
-ZooKeeperResponsePtr ZooKeeperCheckRequest::makeResponse() const { return std::make_shared<ZooKeeperCheckResponse>(); }
+ZooKeeperResponsePtr ZooKeeperCheckRequest::makeResponse() const { return not_exists ? std::make_shared<ZooKeeperCheckNotExistsResponse>() : std::make_shared<ZooKeeperCheckResponse>(); }
 ZooKeeperResponsePtr ZooKeeperCloseRequest::makeResponse() const { return std::make_shared<ZooKeeperCloseResponse>(); }
 ZooKeeperResponsePtr ZooKeeperSetACLRequest::makeResponse() const { return std::make_shared<ZooKeeperSetACLResponse>(); }
 ZooKeeperResponsePtr ZooKeeperGetACLRequest::makeResponse() const { return std::make_shared<ZooKeeperGetACLResponse>(); }
@@ -723,6 +723,9 @@ void registerZooKeeperRequest(ZooKeeperRequestFactory & factory)
             res->operation_type = ZooKeeperMultiRequest::OperationType::Read;
         else if constexpr (num == OpNum::Multi)
             res->operation_type = ZooKeeperMultiRequest::OperationType::Write;
+        else if constexpr (num == OpNum::CheckNotExists || num == OpNum::CreateIfNotExists)
+            res->not_exists = true;
+
         return res;
     });
 }
@@ -749,6 +752,8 @@ ZooKeeperRequestFactory::ZooKeeperRequestFactory()
     registerZooKeeperRequest<OpNum::SetWatches, ZooKeeperSetWatchesRequest>(*this);
     registerZooKeeperRequest<OpNum::GetACL, ZooKeeperGetACLRequest>(*this);
     registerZooKeeperRequest<OpNum::SetACL, ZooKeeperSetACLRequest>(*this);
+    registerZooKeeperRequest<OpNum::CheckNotExists, ZooKeeperCheckRequest>(*this);
+    registerZooKeeperRequest<OpNum::CreateIfNotExists, ZooKeeperCreateRequest>(*this);
 }
 
 }

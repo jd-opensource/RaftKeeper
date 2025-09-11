@@ -429,6 +429,54 @@ def test_multi_read():
         close_zk_clients([genuine_zk, fake_zk])
 
 
+def test_create_if_not_exists():
+    fake_zk = None
+    try:
+        fake_zk = get_fake_zk(True)
+        if fake_zk.exists('/test_create_if_not_exists'):
+            fake_zk.delete('/test_create_if_not_exists', recursive=True)
+        fake_zk.create('/test_create_if_not_exists')
+
+        fake_zk.create('/test_create_if_not_exists/0')
+        fake_zk.create_if_not_exists ('/test_create_if_not_exists/0')
+        fake_zk.create_if_not_exists ('/test_create_if_not_exists/1')
+
+        assert(list(sorted(fake_zk.get_children('/test_create_if_not_exists'))) == ['0', '1'])
+
+    finally:
+        close_zk_clients([fake_zk])
+
+def test_check_if_not_exists():
+    fake_zk = None
+    try:
+        fake_zk = get_fake_zk(True)
+
+        if fake_zk.exists('/test_check_if_not_exists'):
+            fake_zk.delete('/test_check_if_not_exists', recursive=True)
+        fake_zk.create('/test_check_if_not_exists')
+
+        t = fake_zk.transaction()
+        t.check_if_not_exists('/test_check_if_not_exists/1', -1)
+        t.create('/test_check_if_not_exists/1')
+        t.check('/test_check_if_not_exists/1', -1)
+        t.create('/test_check_if_not_exists/2')
+        t.check_if_not_exists('/test_check_if_not_exists/2', -1)
+        t.create('/test_check_if_not_exists/2-2')
+
+        from kazoo.exceptions import RolledBackError, NodeExistsError, RuntimeInconsistency
+        results = t.commit()
+        assert results[0].__class__ == RolledBackError
+        assert results[1].__class__ == RolledBackError
+        assert results[2].__class__ == RolledBackError
+        assert results[3].__class__ == RolledBackError
+        assert results[4].__class__ == NodeExistsError
+        assert results[5].__class__ == RuntimeInconsistency
+
+    finally:
+        fake_zk.stop()
+        fake_zk.close()
+
+
 def exists(zk, path):
     result = zk.exists(path)
     return result is not None

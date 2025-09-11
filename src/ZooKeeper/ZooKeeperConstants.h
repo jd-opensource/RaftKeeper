@@ -42,7 +42,11 @@ enum class OpNum : int32_t
     NewSession = -10, /// Used to create new session.
     OldNewSession = 997, /// Same with NewSession, just for backward compatibility
 
-    FilteredList = 500, /// Special operation only used in ClickHouse.
+    /// Special operation only used in ClickHouse.
+    FilteredList = 500,
+    CheckNotExists = 501,
+    CreateIfNotExists = 502,
+
     UpdateSession = 998, /// Special internal request. Used to session reconnect.
 };
 

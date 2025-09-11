@@ -280,6 +280,12 @@ struct StoreRequestCreate final : public StoreRequest
         String path_created = request.path;
         if (request.is_sequential)
         {
+            if (request.not_exists)
+            {
+                response.error = Coordination::Error::ZBADARGUMENTS;
+                return {response_ptr, undo};
+            }
+
             auto seq_num = parent->stat.cversion;
 
             std::stringstream seq_num_str; // STYLE_CHECK_ALLOW_STD_STRING_STREAM
@@ -290,7 +296,13 @@ struct StoreRequestCreate final : public StoreRequest
         }
         if (store.exists(path_created))
         {
-            response.error = Coordination::Error::ZNODEEXISTS;
+            if (zk_request->getOpNum() == Coordination::OpNum::CreateIfNotExists)
+            {
+                response.error = Coordination::Error::ZOK;
+                response.path_created = request.path;
+            }
+            else
+                response.error = Coordination::Error::ZNODEEXISTS;
             return {response_ptr, undo};
         }
         String child_path = getBaseName(path_created);
@@ -735,6 +747,13 @@ struct StoreRequestList final : public StoreRequest
 
 struct StoreRequestCheck final : public StoreRequest
 {
+
+    explicit StoreRequestCheck(const Coordination::ZooKeeperRequestPtr & zk_request_)
+    : StoreRequest(zk_request_)
+    {
+        check_not_exists = zk_request->getOpNum() == Coordination::OpNum::CheckNotExists;
+    }
+
     using StoreRequest::StoreRequest;
 
     bool checkAuth(KeeperStore & store, int64_t session_id) const override
@@ -770,20 +789,29 @@ struct StoreRequestCheck final : public StoreRequest
         auto & request_typed = dynamic_cast<Coordination::ZooKeeperCheckRequest &>(*zk_request);
 
         auto node = store.getNode(request_typed.path);
-        if (node == nullptr)
+
+        if (check_not_exists)
         {
-            response_typed.error = Coordination::Error::ZNONODE;
-        }
-        else if (request_typed.version != -1 && request_typed.version != node->stat.version) /// don't need lock
-        {
-            response_typed.error = Coordination::Error::ZBADVERSION;
+            if (node && (request_typed.version == -1 || request_typed.version == node->stat.version))
+                response_typed.error = Coordination::Error::ZNODEEXISTS;
+            else
+                response_typed.error = Coordination::Error::ZOK;
         }
         else
         {
-            response_typed.error = Coordination::Error::ZOK;
+            if (node == nullptr)
+                response_typed.error = Coordination::Error::ZNONODE;
+            else if (request_typed.version != -1 && request_typed.version != node->stat.version) /// don't need lock
+                response_typed.error = Coordination::Error::ZBADVERSION;
+            else
+                response_typed.error = Coordination::Error::ZOK;
         }
+
         return {response, {}};
     }
+
+private:
+    bool check_not_exists;
 };
 
 struct StoreRequestSetACL final : public StoreRequest
@@ -981,7 +1009,7 @@ struct StoreRequestMultiTxn final : public StoreRequest
         for (const auto & sub_request : request.requests)
         {
             auto sub_zk_request = std::dynamic_pointer_cast<Coordination::ZooKeeperRequest>(sub_request);
-            if (sub_zk_request->getOpNum() == Coordination::OpNum::Create)
+            if (sub_zk_request->getOpNum() == Coordination::OpNum::Create || sub_zk_request->getOpNum() == Coordination::OpNum::CreateIfNotExists)
             {
                 check_operation_type(OperationType::Write);
                 concrete_requests.push_back(std::make_shared<StoreRequestCreate>(sub_zk_request));
@@ -996,7 +1024,7 @@ struct StoreRequestMultiTxn final : public StoreRequest
                 check_operation_type(OperationType::Write);
                 concrete_requests.push_back(std::make_shared<StoreRequestSet>(sub_zk_request));
             }
-            else if (sub_zk_request->getOpNum() == Coordination::OpNum::Check)
+            else if (sub_zk_request->getOpNum() == Coordination::OpNum::Check || sub_zk_request->getOpNum() == Coordination::OpNum::CheckNotExists)
             {
                 check_operation_type(OperationType::Write);
                 concrete_requests.push_back(std::make_shared<StoreRequestCheck>(sub_zk_request));
@@ -1190,6 +1218,8 @@ StoreRequestFactory::StoreRequestFactory()
     registerNuKeeperRequestWrapper<Coordination::OpNum::MultiRead, StoreRequestMultiTxn>(*this);
     registerNuKeeperRequestWrapper<Coordination::OpNum::SetACL, StoreRequestSetACL>(*this);
     registerNuKeeperRequestWrapper<Coordination::OpNum::GetACL, StoreRequestGetACL>(*this);
+    registerNuKeeperRequestWrapper<Coordination::OpNum::CheckNotExists, StoreRequestCheck>(*this);
+    registerNuKeeperRequestWrapper<Coordination::OpNum::CreateIfNotExists, StoreRequestCreate>(*this);
 }
 
 
@@ -1623,8 +1653,10 @@ void KeeperStore::initializeSystemNodes()
 #else
     add_node(CLICKHOUSE_KEEPER_SYSTEM_PATH);
     add_node(CLICKHOUSE_KEEPER_API_VERSION_PATH);
+    add_node(CLICKHOUSE_KEEPER_API_FEATURE_FLAGS_PATH);
 
     data_tree.get(CLICKHOUSE_KEEPER_API_VERSION_PATH)->data = toString(static_cast<uint8_t>(CURRENT_KEEPER_API_VERSION));
+    data_tree.get(CLICKHOUSE_KEEPER_API_FEATURE_FLAGS_PATH)->data = CURRENT_KEEPER_FEATURE_FLAGS;
 #endif
 }
 

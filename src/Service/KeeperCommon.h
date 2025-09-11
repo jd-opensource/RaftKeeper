@@ -18,15 +18,51 @@ using ThreadPoolPtr = std::shared_ptr<ThreadPool>;
 #else
     const String CLICKHOUSE_KEEPER_SYSTEM_PATH = "/keeper";
     const String CLICKHOUSE_KEEPER_API_VERSION_PATH = CLICKHOUSE_KEEPER_SYSTEM_PATH + "/api_version";
+    const String CLICKHOUSE_KEEPER_API_FEATURE_FLAGS_PATH = CLICKHOUSE_KEEPER_SYSTEM_PATH + "/feature_flags";
 
     enum class KeeperApiVersion : uint8_t
     {
         ZOOKEEPER_COMPATIBLE = 0,
         WITH_FILTERED_LIST,
-        WITH_MULTI_READ
+        WITH_MULTI_READ,
+        WITH_CHECK_NOT_EXISTS,
+    };
+
+    enum class KeeperFeatureFlag : size_t
+    {
+        FILTERED_LIST = 0,
+        MULTI_READ,
+        CHECK_NOT_EXISTS,
+        CREATE_IF_NOT_EXISTS,
+        MAX,
+    };
+
+    class KeeperFeatureFlags
+    {
+    public:
+        KeeperFeatureFlags();
+
+        explicit KeeperFeatureFlags(std::string feature_flags_);
+
+        /// backwards compatibility
+        void fromApiVersion(KeeperApiVersion keeper_api_version);
+
+        bool isEnabled(KeeperFeatureFlag feature) const;
+
+        void setFeatureFlags(std::string feature_flags_);
+        const std::string & getFeatureFlags() const;
+
+        void enableFeatureFlag(KeeperFeatureFlag feature);
+        void disableFeatureFlag(KeeperFeatureFlag feature);
+
+    private:
+        std::string feature_flags;
     };
 
     inline constexpr auto CURRENT_KEEPER_API_VERSION = KeeperApiVersion::WITH_MULTI_READ;
+    // 0b11110000 enable FILTERED_LIST & MULTI_READ & CHECK_NOT_EXISTS & CREATE_IF_NOT_EXISTS,
+    // For example, set 0b10110000 to disable MULTI_READ
+    inline const std::string CURRENT_KEEPER_FEATURE_FLAGS = "\xF0";
 #endif
 
 struct RequestId;
