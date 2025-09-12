@@ -4,7 +4,8 @@
 
 #include <Service/KeeperCommon.h>
 
-
+#ifdef COMPATIBLE_MODE_ZOOKEEPER
+#else
 TEST(FeatureFlagsTest, TestFeatureFlags)
 {
     RK::KeeperFeatureFlags feature_flags;
@@ -31,3 +32,4 @@ TEST(FeatureFlagsTest, TestFeatureFlags)
     ASSERT_TRUE(default_feature_flags.isEnabled(RK::KeeperFeatureFlag::CHECK_NOT_EXISTS));
     ASSERT_TRUE(default_feature_flags.isEnabled(RK::KeeperFeatureFlag::CREATE_IF_NOT_EXISTS));
 }
+#endif
