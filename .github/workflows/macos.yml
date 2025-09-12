@@ -15,8 +15,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install cmake
+        run: brew list cmake &>/dev/null || brew install cmake
+
       - name: Install tools
-        run: brew install ninja ccache cmake llvm@18
+        run: brew install ninja ccache llvm@18
 
       - name: Generate Makefile
         run: export CC=$(brew --prefix llvm@18)/bin/clang CXX=$(brew --prefix llvm@18)/bin/clang++ && cmake -G Ninja -B ./build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
