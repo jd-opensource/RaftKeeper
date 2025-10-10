@@ -224,7 +224,7 @@ public:
     /// whether znode exist
     bool exists(const String & path);
 
-    /// get an znode
+    /// get a znode
     KeeperNode & getNode(const String & path);
 
     KeeperStore & getStore() { return store; }

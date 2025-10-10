@@ -565,11 +565,11 @@ void KeeperSnapshotStore::loadLatestSnapshot(KeeperStore & store)
 
     // The object IDs are consecutive starting from 1,
     // so the first number must be 1, and the last number must be the total count.
-    if (objects_path.begin()->first != 1 || objects_path.rbegin()->first != objects_cnt)
+    if (objects_path.begin()->first != 1 || objects_path.rbegin()->first != objects_cnt || objects_cnt != objects_path.size())
     {
         throw Exception(ErrorCodes::SNAPSHOT_OBJECT_INCOMPLETE,
-        "Loading snapshot objects error, expecting 1 ~ {} objects, got {} ~ {} objects",
-        objects_cnt, objects_path.begin()->first, objects_path.rbegin()->first);
+        "Loading snapshot objects error, expecting {} objects, got {}",
+        objects_cnt, objects_path.size());
     }
 
     ThreadPool thread_pool(SNAPSHOT_THREAD_NUM);
